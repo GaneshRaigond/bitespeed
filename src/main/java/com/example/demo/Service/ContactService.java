@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 public class ContactService {
@@ -33,60 +34,141 @@ public class ContactService {
         // Identify the primary contact among the matching contacts
         Contact primaryContact = matchingContacts.stream()
                 .filter(contact -> contact.getLinkPrecedence() == LinkPrecedence.PRIMARY)
-                .findFirst()
-                .orElse(matchingContacts.get(0));
+                .min(Comparator.comparing(Contact::getCreatedAt))
+                .orElse(matchingContacts.stream()
+                        .min(Comparator.comparing(Contact::getCreatedAt))
+                        .orElse(null));
 
         // If the primary contact does not have the current email or phone number, create a new secondary contact
-        Optional<Contact> existingContactOpt = matchingContacts.stream()
-                .filter(contact -> email.equals(contact.getEmail()) && phoneNumber.equals(contact.getPhoneNumber()))
-                .findFirst();
+        List<Contact> otherPrimaryContacts = matchingContacts.stream()
+                .filter(contact -> contact.getLinkPrecedence() == LinkPrecedence.PRIMARY && !contact.equals(primaryContact))
+                .collect(Collectors.toList());
+        boolean emailExists = matchingContacts.stream().anyMatch(contact -> email.equals(contact.getEmail()));
+        boolean phoneNumberExists = matchingContacts.stream().anyMatch(contact -> phoneNumber.equals(contact.getPhoneNumber()));
 
-        if (existingContactOpt.isPresent()) {
-            // The contact already exists, no need to create a new one
-            return existingContactOpt.get();
+        if (!emailExists || !phoneNumberExists) {
+            // Create a new secondary contact if the email or phone number is new
+            Contact newSecondaryContact = new Contact();
+            newSecondaryContact.setEmail(email);
+            newSecondaryContact.setPhoneNumber(phoneNumber);
+            newSecondaryContact.setLinkPrecedence(LinkPrecedence.SECONDARY);
+            newSecondaryContact.setLinkedId(primaryContact.getId());
+            newSecondaryContact.setCreatedAt(LocalDateTime.now());
+            newSecondaryContact.setUpdatedAt(LocalDateTime.now());
+
+            // Handle other primary contacts
+            for (Contact otherPrimaryContact : otherPrimaryContacts) {
+                otherPrimaryContact.setLinkPrecedence(LinkPrecedence.SECONDARY);
+                otherPrimaryContact.setLinkedId(primaryContact.getId());
+                otherPrimaryContact.setUpdatedAt(LocalDateTime.now());
+                contactRepository.save(otherPrimaryContact);
+            }
+
+            contactRepository.save(newSecondaryContact);
+
+        } else {
+            if (otherPrimaryContacts.size() > 0) {
+                for (Contact otherPrimaryContact : otherPrimaryContacts) {
+                    otherPrimaryContact.setLinkPrecedence(LinkPrecedence.SECONDARY);
+                    otherPrimaryContact.setLinkedId(primaryContact.getId());
+                    otherPrimaryContact.setUpdatedAt(LocalDateTime.now());
+                    contactRepository.save(otherPrimaryContact);
+                }
+
+                // Create a new secondary contact for the incoming request
+                Contact newSecondaryContact = new Contact();
+                newSecondaryContact.setEmail(email);
+                newSecondaryContact.setPhoneNumber(phoneNumber);
+                newSecondaryContact.setLinkPrecedence(LinkPrecedence.SECONDARY);
+                newSecondaryContact.setLinkedId(primaryContact.getId());
+                newSecondaryContact.setCreatedAt(LocalDateTime.now());
+                newSecondaryContact.setUpdatedAt(LocalDateTime.now());
+                contactRepository.save(newSecondaryContact);
+
+            }
+
         }
-
-        Contact newSecondaryContact = new Contact();
-        newSecondaryContact.setEmail(email);
-        newSecondaryContact.setPhoneNumber(phoneNumber);
-        newSecondaryContact.setLinkPrecedence(LinkPrecedence.SECONDARY);
-        newSecondaryContact.setLinkedId(primaryContact.getId());
-        newSecondaryContact.setCreatedAt(LocalDateTime.now());
-        newSecondaryContact.setUpdatedAt(LocalDateTime.now());
-        return contactRepository.save(newSecondaryContact);
+        return primaryContact;
     }
 
     public Map<String, Object> getConsolidatedContact(String email, String phoneNumber) {
         List<Contact> matchingContacts = contactRepository.findByEmailOrPhoneNumber(email, phoneNumber);
 
         if (matchingContacts.isEmpty()) {
-            return null;
+            Contact newContact = new Contact();
+            newContact.setEmail(email);
+            newContact.setPhoneNumber(phoneNumber);
+            newContact.setLinkPrecedence(LinkPrecedence.PRIMARY);
+            newContact.setCreatedAt(LocalDateTime.now());
+            newContact.setUpdatedAt(LocalDateTime.now());
+            contactRepository.save(newContact);
+
+            Map<String, Object> response = new HashMap<>();
+            Map<String, Object> contactData = new HashMap<>();
+            contactData.put("primaryContactId", newContact.getId());
+            contactData.put("emails", Collections.singletonList(newContact.getEmail()));
+            contactData.put("phoneNumbers", Collections.singletonList(newContact.getPhoneNumber()));
+            contactData.put("secondaryContactIds", Collections.emptyList());
+            response.put("contact", contactData);
+            return response;
         }
 
         // Identify the primary contact among the matching contacts
         Contact primaryContact = matchingContacts.stream()
                 .filter(contact -> contact.getLinkPrecedence() == LinkPrecedence.PRIMARY)
-                .findFirst()
-                .orElse(matchingContacts.get(0));
+                .min(Comparator.comparing(Contact::getCreatedAt))
+                .orElse(matchingContacts.stream()
+                        .min(Comparator.comparing(Contact::getCreatedAt))
+                        .orElse(null));
 
-        Set<String> emails = new LinkedHashSet<>();
-        Set<String> phoneNumbers = new LinkedHashSet<>();
-        List<Integer> secondaryContactIds = new ArrayList<>();
+        List<Contact> otherPrimaryContacts = matchingContacts.stream()
+                .filter(contact -> contact.getLinkPrecedence() == LinkPrecedence.PRIMARY && !contact.equals(primaryContact))
+                .collect(Collectors.toList());
 
-        for (Contact contact : matchingContacts) {
-            if (contact.getLinkPrecedence() == LinkPrecedence.PRIMARY) {
-                emails.add(contact.getEmail());
-                phoneNumbers.add(contact.getPhoneNumber());
-            } else {
-                secondaryContactIds.add(contact.getId());
-                if (contact.getEmail() != null) {
-                    emails.add(contact.getEmail());
-                }
-                if (contact.getPhoneNumber() != null) {
-                    phoneNumbers.add(contact.getPhoneNumber());
-                }
+        boolean emailExists = matchingContacts.stream()
+                .anyMatch(contact -> email != null && email.equals(contact.getEmail()));
+
+        boolean phoneNumberExists = matchingContacts.stream()
+                .anyMatch(contact -> phoneNumber != null && phoneNumber.equals(contact.getPhoneNumber()));
+
+        if (!emailExists || !phoneNumberExists) {
+            // Create a new secondary contact if the email or phone number is new
+            Contact newSecondaryContact = new Contact();
+            newSecondaryContact.setEmail(email);
+            newSecondaryContact.setPhoneNumber(phoneNumber);
+            newSecondaryContact.setLinkPrecedence(LinkPrecedence.SECONDARY);
+            newSecondaryContact.setLinkedId(primaryContact.getId());
+            newSecondaryContact.setCreatedAt(LocalDateTime.now());
+            newSecondaryContact.setUpdatedAt(LocalDateTime.now());
+            contactRepository.save(newSecondaryContact);
+
+            // Handle other primary contacts
+            for (Contact otherPrimaryContact : otherPrimaryContacts) {
+                otherPrimaryContact.setLinkPrecedence(LinkPrecedence.SECONDARY);
+                otherPrimaryContact.setLinkedId(primaryContact.getId());
+                otherPrimaryContact.setUpdatedAt(LocalDateTime.now());
+                contactRepository.save(otherPrimaryContact);
             }
+
+            matchingContacts.add(newSecondaryContact);
         }
+
+        List<String> emails = matchingContacts.stream()
+                .map(Contact::getEmail)
+                .filter(Objects::nonNull)
+                .distinct()
+                .collect(Collectors.toList());
+
+        List<String> phoneNumbers = matchingContacts.stream()
+                .map(Contact::getPhoneNumber)
+                .filter(Objects::nonNull)
+                .distinct()
+                .collect(Collectors.toList());
+
+        List<Integer> secondaryContactIds = matchingContacts.stream()
+                .filter(contact -> contact.getLinkPrecedence() == LinkPrecedence.SECONDARY)
+                .map(Contact::getId)
+                .collect(Collectors.toList());
 
         Map<String, Object> response = new HashMap<>();
         Map<String, Object> contactData = new HashMap<>();
